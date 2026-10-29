@@ -20,7 +20,7 @@ extern const AP_HAL::HAL& hal;
 #define PKA_RETRY_MS     1000    // gap between challenges
 #define PKA_TIMEOUT_MS   1000    // time the pack has to answer
 #define PKA_REAUTH_MS   10000    // while disarmed, re-challenge this often
-#define PKA_EXPIRE_MS   30000    // drop trust if no good answer for this long
+#define PKA_FRESH_MS     6000    // arming needs a good answer at most this old
 #define PKA_BEAT_MS      2000    // thread must beat within this
 
 #if AP_PACKAUTH_PARAMS_ENABLED
@@ -71,14 +71,17 @@ bool AP_PackAuth::alive() const
 
 bool AP_PackAuth::gate_check(char *buf, size_t len) const
 {
-    if (_ok && alive()) {
+    const uint32_t now = AP_HAL::millis();
+    const bool alive_now = alive();
+    if (_ok && alive_now && (now - _ok_ms) < PKA_FRESH_MS) {
         return true;
     }
     const char *why = _why;
     if (_thread_failed)  { why = "thread failed"; }
     else if (!_started)  { why = "not started"; }
-    else if (!alive())   { why = (_beat_ms == 0) ? "starting" : "task stalled"; }
-    else if (!_dev)      { why = "scanning I2C"; }
+    else if (!alive_now) { why = (_beat_ms == 0) ? "starting" : "task stalled"; }
+    else if (!_dev)      { why = "pack not found"; }
+    else if (_ok)        { why = "proof is stale"; }
     hal.util->snprintf(buf, len, "Pack auth: %s", why);
     return false;
 }
@@ -119,11 +122,11 @@ void AP_PackAuth::step()
         if (hal.util->get_soft_armed()) {
             return;                           // never disturb an armed vehicle
         }
-        if (now - _ok_ms > PKA_EXPIRE_MS) {
-            _ok = false;                      // pack stopped answering
+        if (now - _ok_ms > PKA_FRESH_MS) {
+            _ok = false;
             _why = "pack stopped answering";
         } else if (now - _ok_ms < PKA_REAUTH_MS) {
-            return;                           // proven recently
+            return;
         }
     }
 
@@ -146,7 +149,9 @@ void AP_PackAuth::find_device()
         return;
     }
 
-    const uint32_t mask = hal.i2c_mgr->get_bus_mask_external();
+    const uint32_t mask = hal.i2c_mgr->get_bus_mask();   // all buses, not only "external"
+    _scan_mask = mask;
+    _n_scans++;
     for (uint8_t b = 0; b < 8; b++) {
         if (!(mask & (1U << b))) {
             continue;
@@ -271,6 +276,8 @@ void AP_PackAuth::debug_print()
     GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PKA tx=%u ok=%u bad=%u xf=%u to=%u st=%u",
                   (unsigned)_n_sent, (unsigned)_n_ok, (unsigned)_n_bad,
                   (unsigned)_n_xfer_fail, (unsigned)_n_timeout, (unsigned)_last_status);
+    GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PKA scans=%u mask=0x%lx",
+                (unsigned)_n_scans, (unsigned long)_scan_mask);
 }
 #endif
 

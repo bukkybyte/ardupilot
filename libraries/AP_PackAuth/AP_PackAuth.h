@@ -62,6 +62,8 @@ private:
     uint8_t  _last_status = 0xFF;
     const char *_why = "starting";
     uint16_t _n_sent = 0, _n_ok = 0, _n_bad = 0, _n_xfer_fail = 0, _n_timeout = 0;
+    uint16_t _n_scans = 0;
+    uint32_t _scan_mask = 0;
 #if AP_PACKAUTH_DEBUG
     uint32_t _dbg_ms = 0;
 #endif
