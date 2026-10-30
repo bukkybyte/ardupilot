@@ -16,7 +16,7 @@
 #include "smartpack_proto.h"
 #include "smartpack_key.h"
 
-static const uint8_t  I2C_ADDR   = 0x0B;
+static const uint8_t  I2C_ADDR   = 0x0C;
 static const uint16_t PACK_SERIAL = 0x1234;
 
 // SBS registers used by ArduPilot's generic SMBus backend
