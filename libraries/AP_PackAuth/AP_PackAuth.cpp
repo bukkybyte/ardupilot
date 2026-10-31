@@ -15,7 +15,6 @@
 
 extern const AP_HAL::HAL& hal;
 
-#define SBS_REG_SERIAL   0x1C
 #define PKA_SCAN_MS      2000    // rescan period while a pack isn't found
 #define PKA_RETRY_MS     1000    // gap between challenges to one pack
 #define PKA_TIMEOUT_MS    400    // time a pack has to answer
@@ -23,6 +22,7 @@ extern const AP_HAL::HAL& hal;
 #define PKA_FRESH_MS     8000    // arming needs a good answer at most this old
 #define PKA_BEAT_MS      2000    // thread must beat within this
 #define PKA_DETECT_MS   10000    // detection report period while unprovisioned
+#define PKA_USE_TRIES       5    // attempts to get a flight counted by the pack
 
 #if AP_PACKAUTH_PARAMS_ENABLED
 const AP_Param::GroupInfo AP_PackAuth::var_info[] = {
@@ -188,6 +188,13 @@ bool AP_PackAuth::gate_check(char *buf, size_t len) const
         hal.util->snprintf(buf, len, "Pack %u: %s", (unsigned)(i + 1), p.ok ? "proof is stale" : p.why);
         return false;
     }
+    // packs of different sets must not be mixed
+    for (uint8_t i = 1; i < n; i++) {
+        if (_pack[i].set_id != _pack[0].set_id) {
+            hal.util->snprintf(buf, len, "Pack %u: other set", (unsigned)(i + 1));
+            return false;
+        }
+    }
     return true;
 }
 
@@ -208,6 +215,21 @@ void AP_PackAuth::thread()
 
     while (true) {
         _beat_ms = AP_HAL::millis();
+
+        // a flight is "valid" if the vehicle stayed armed long enough; count it on disarm
+        const bool armed_now = hal.util->get_soft_armed();
+        if (armed_now && !_was_armed) {
+            _arm_start_ms = AP_HAL::millis();
+        } else if (!armed_now && _was_armed &&
+                   (AP_HAL::millis() - _arm_start_ms) >= (uint32_t)AP_PACKAUTH_MIN_FLIGHT_S * 1000U) {
+            const uint8_t np = num_packs();
+            for (uint8_t k = 0; k < np; k++) {
+                _pack[k].use_base = _pack[k].count;
+                _pack[k].use_tries = 0;
+                _pack[k].use_pending = true;
+            }
+        }
+        _was_armed = armed_now;
 
         bool detect = false;
 #if AP_PACKAUTH_CFG_SIGNED
@@ -260,7 +282,7 @@ void AP_PackAuth::step(uint8_t i)
         if (now - p.ok_ms > PKA_FRESH_MS) {
             p.ok = false;                     // proof went stale
             p.why = "pack stopped answering";
-        } else if (now - p.ok_ms < PKA_REAUTH_MS) {
+        } else if (!p.use_pending && now - p.ok_ms < PKA_REAUTH_MS) {
             return;                           // proven recently
         }
     }
@@ -319,18 +341,18 @@ void AP_PackAuth::challenge(uint8_t i)
 {
     Pack &p = _pack[i];
 
-    // 1. pack serial: standard SBS SerialNumber(), plain 2-byte read, no PEC
-    uint8_t sb[2];
+    // 1. the pack's record: serial, set, activation date, use count, max count
+    uint8_t info[SMARTPACK_INFO_LEN];
     {
         WITH_SEMAPHORE(p.dev->get_semaphore());
-        if (!p.dev->read_registers(SBS_REG_SERIAL, sb, sizeof(sb))) {
+        if (!p.dev->read_registers(SMARTPACK_REG_INFO, info, sizeof(info))) {
             p.n_xfer_fail++;
             p.ok = false;
             p.why = "no answer on I2C";
             return;
         }
     }
-    const uint16_t serial = (uint16_t)sb[0] | ((uint16_t)sb[1] << 8);
+    const uint16_t serial = smartpack_le16(&info[0]);
     p.serial = serial;
     if (p.ok && serial != p.ok_serial) {
         p.ok = false;                         // a different pack: trust nothing
@@ -386,23 +408,71 @@ void AP_PackAuth::challenge(uint8_t i)
         return;
     }
 
-    // 4. verify without early exit
+    // 4. verify without early exit; the MAC covers the whole record
     uint8_t expected[SMARTPACK_RESPONSE_LEN];
-    smartpack_compute_response(SMARTPACK_KEY, nonce, serial, expected);
+    smartpack_compute_response(SMARTPACK_KEY, nonce, info, expected);
     uint8_t diff = 0;
     for (uint8_t k = 0; k < sizeof(resp); k++) {
         diff |= expected[k] ^ resp[k];
     }
-    if (diff == 0) {
-        p.ok_serial = serial;
-        p.ok_ms = AP_HAL::millis();
-        p.ok = true;
-        p.n_ok++;
-        p.why = "authenticated";
-    } else {
+    if (diff != 0) {
         p.ok = false;                         // a wrong answer revokes trust
         p.n_bad++;
         p.why = "wrong response";
+        return;
+    }
+
+    // genuine pack: its record can be trusted now
+    p.set_id = smartpack_le32(&info[2]);
+    p.activated = smartpack_le32(&info[6]);
+    p.count = smartpack_le16(&info[10]);
+    p.max_count = smartpack_le16(&info[12]);
+
+    // 5. a flight has finished: report one use to the pack (authenticated, one-shot)
+    if (p.use_pending) {
+        if (p.count > p.use_base) {
+            p.use_pending = false;            // the pack counted it
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Pack %u: use %u/%u",
+                          (unsigned)(i + 1), (unsigned)p.count, (unsigned)p.max_count);
+        } else if (p.use_tries < PKA_USE_TRIES) {
+            uint8_t mac[SMARTPACK_USE_LEN];
+            smartpack_compute_use_mac(SMARTPACK_KEY, nonce, info, mac);
+            uint8_t upkt[1 + SMARTPACK_USE_LEN];
+            upkt[0] = SMARTPACK_REG_USE;
+            memcpy(&upkt[1], mac, sizeof(mac));
+            WITH_SEMAPHORE(p.dev->get_semaphore());
+            if (!p.dev->transfer(upkt, sizeof(upkt), nullptr, 0)) {
+                p.n_xfer_fail++;
+            }
+            p.use_tries++;
+        } else {
+            p.use_pending = false;
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Pack %u: use not saved", (unsigned)(i + 1));
+        }
+    }
+
+    // 6. policy on the authenticated record
+    if (serial == 0 || p.set_id == 0 || p.max_count == 0) {
+        p.ok = false;
+        p.why = "pack not provisioned";
+        return;
+    }
+    if (p.count >= p.max_count) {
+        p.ok = false;
+        p.why = "life used up";
+        return;
+    }
+
+    const bool was_ok = p.ok;
+    p.ok_serial = serial;
+    p.ok_ms = AP_HAL::millis();
+    p.ok = true;
+    p.n_ok++;
+    p.why = "authenticated";
+    if (!was_ok) {
+        GCS_SEND_TEXT(MAV_SEVERITY_INFO, "Pack %u: #%u set %lu use %u/%u", (unsigned)(i + 1),
+                      (unsigned)serial, (unsigned long)p.set_id,
+                      (unsigned)p.count, (unsigned)p.max_count);
     }
 }
 
@@ -427,7 +497,11 @@ void AP_PackAuth::debug_print()
         const Pack &p = _pack[i];
         GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PKA%u bus=%d ok=%u ser=%ld %s",
                       (unsigned)(i + 1), (int)p.bus_found, p.ok ? 1U : 0U, (long)p.serial, p.why);
-        if (!p.ok) {
+        if (p.ok) {
+            GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PKA%u set=%lu d=%lu use=%u/%u", (unsigned)(i + 1),
+                          (unsigned long)p.set_id, (unsigned long)p.activated,
+                          (unsigned)p.count, (unsigned)p.max_count);
+        } else {
             GCS_SEND_TEXT(MAV_SEVERITY_INFO, "PKA%u tx=%u ok=%u bad=%u xf=%u to=%u",
                           (unsigned)(i + 1), (unsigned)p.n_sent, (unsigned)p.n_ok,
                           (unsigned)p.n_bad, (unsigned)p.n_xfer_fail, (unsigned)p.n_timeout);

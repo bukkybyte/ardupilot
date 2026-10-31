@@ -38,6 +38,10 @@
 #error "AP_PACKAUTH_CFG_SIGNED needs AP_PACKAUTH_PARAMS_ENABLED"
 #endif
 
+#ifndef AP_PACKAUTH_MIN_FLIGHT_S
+#define AP_PACKAUTH_MIN_FLIGHT_S 30    // armed at least this long => one use is counted (0 = every arm)
+#endif
+
 #ifndef AP_PACKAUTH_DEBUG
 #define AP_PACKAUTH_DEBUG 0            // testing only: status text every 5 s
 #endif

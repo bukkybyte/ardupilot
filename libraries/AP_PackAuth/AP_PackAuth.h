@@ -39,6 +39,11 @@ private:
         int8_t   bus_found = -1;
         uint8_t  last_status = 0xFF;
         const char *why = "starting";
+        uint32_t set_id = 0, activated = 0;  // from the pack's authenticated record
+        uint16_t count = 0, max_count = 0;
+        bool     use_pending = false;        // a finished flight still has to be reported to the pack
+        uint16_t use_base = 0;               // pack count when that flight began
+        uint8_t  use_tries = 0;
         uint16_t n_sent = 0, n_ok = 0, n_bad = 0, n_xfer_fail = 0, n_timeout = 0, n_scans = 0;
     };
 
@@ -84,6 +89,8 @@ private:
     bool _started = false;
     bool _thread_failed = false;
     volatile uint32_t _beat_ms = 0;          // thread heartbeat
+    bool _was_armed = false;                 // arm/disarm tracking for use counting
+    uint32_t _arm_start_ms = 0;
 };
 
 #endif  // AP_PACKAUTH_ENABLED
