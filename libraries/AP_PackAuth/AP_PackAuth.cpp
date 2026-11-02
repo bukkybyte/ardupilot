@@ -172,7 +172,7 @@ bool AP_PackAuth::gate_check(char *buf, size_t len) const
     else if (!alive())         { why = (_beat_ms == 0) ? "starting" : "task stalled"; }
     else if (!config_ok(n))    { why = "bad pack address config"; }
 #if AP_PACKAUTH_CFG_SIGNED
-    else if (!cfg_valid())     { why = "pack count not signed"; }
+    else if (!cfg_valid())     { why = "pack not signed"; }
 #endif
     if (why != nullptr) {
         hal.util->snprintf(buf, len, "Pack auth: %s", why);
@@ -348,7 +348,7 @@ void AP_PackAuth::challenge(uint8_t i)
         if (!p.dev->read_registers(SMARTPACK_REG_INFO, info, sizeof(info))) {
             p.n_xfer_fail++;
             p.ok = false;
-            p.why = "no answer on I2C";
+            p.why = "check connection";
             return;
         }
     }
