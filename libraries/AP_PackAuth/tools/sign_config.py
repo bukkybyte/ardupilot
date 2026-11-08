@@ -2,7 +2,7 @@
 """Sign the pack-count config for ONE Cube so ARMING_PKA_NUM can't be changed
 without the key.
 
-  sign_config.py --key libraries/AP_PackAuth/smartpack_key.h --uid <24 hex chars> --packs 3 > file_name
+  sign_config.py --key libraries/AP_PackAuth/smartpack_key.h --uid <24 hex chars> --packs 3
 
 --uid is the "PackAuth cfg-id" the Cube prints while unprovisioned.
 Prints a Mission Planner param file (name,value) to stdout.
